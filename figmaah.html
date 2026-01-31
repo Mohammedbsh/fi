@@ -1,0 +1,283 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>في جماعة - تطبيق الصلاة</title>
+    <!-- Tailwind CSS for modern UI -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Lucide Icons -->
+    <script src="https://unpkg.com/lucide@latest"></script>
+    <!-- Leaflet Maps -->
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Tajawal:wght@400;700;900&display=swap');
+        body { font-family: 'Tajawal', sans-serif; -webkit-tap-highlight-color: transparent; }
+        .map-container { height: 300px; border-radius: 1.5rem; overflow: hidden; z-index: 1; }
+        .glass { background: rgba(255, 255, 255, 0.8); backdrop-filter: blur(10px); }
+        /* Hide scrollbar */
+        ::-webkit-scrollbar { display: none; }
+    </style>
+</head>
+<body class="bg-slate-50 text-slate-900">
+
+    <div id="root">
+        <!-- Loading Screen -->
+        <div id="loader" class="h-screen flex items-center justify-center bg-emerald-900 text-white">
+            <div class="text-center">
+                <div class="animate-spin rounded-full h-12 w-12 border-t-2 border-b-2 border-white mx-auto mb-4"></div>
+                <h1 class="text-2xl font-bold">في جماعة</h1>
+            </div>
+        </div>
+    </div>
+
+    <!-- Firebase SDKs -->
+    <script type="module">
+        import { initializeApp } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-app.js";
+        import { getAuth, signInAnonymously, onAuthStateChanged, signInWithCustomToken } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-auth.js";
+        import { getFirestore, collection, addDoc, onSnapshot, serverTimestamp, query, doc, updateDoc, increment } from "https://www.gstatic.com/firebasejs/11.1.0/firebase-firestore.js";
+
+        // Firebase Configuration
+        const firebaseConfig = JSON.parse(__firebase_config);
+        const app = initializeApp(firebaseConfig);
+        const auth = getAuth(app);
+        const db = getFirestore(app);
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'fijamaah-v1';
+
+        // App State
+        let currentUser = null;
+        let activeTab = 'home';
+        let prayerGroups = [];
+        let unsubscribeGroups = null;
+
+        // Helper: Get Current Prayer Name
+        const getCurrentPrayer = () => {
+            const hour = new Date().getHours();
+            if (hour >= 4 && hour < 11) return 'الفجر';
+            if (hour >= 11 && hour < 15) return 'الظهر';
+            if (hour >= 15 && hour < 18) return 'العصر';
+            if (hour >= 18 && hour < 19) return 'المغرب';
+            return 'العشاء';
+        };
+
+        // UI Components
+        const renderApp = () => {
+            const root = document.getElementById('root');
+            if (activeTab === 'home') {
+                root.innerHTML = renderHome();
+            } else if (activeTab === 'create') {
+                root.innerHTML = renderCreate();
+                initMap();
+            }
+            lucide.createIcons();
+        };
+
+        const renderHome = () => `
+            <div class="min-h-screen pb-24">
+                <header class="bg-emerald-900 text-white p-6 pt-12 rounded-b-[3rem] shadow-xl text-center relative overflow-hidden">
+                    <div class="relative z-10">
+                        <p class="text-emerald-300 text-xs font-bold mb-1 tracking-widest">الصلاة الحالية</p>
+                        <h2 class="text-5xl font-black mb-3">${getCurrentPrayer()}</h2>
+                        <div class="inline-flex items-center gap-2 bg-white/10 px-4 py-1.5 rounded-full text-sm">
+                            <i data-lucide="clock" class="w-4 h-4"></i>
+                            <span>${new Date().toLocaleTimeString('ar-SA', {hour:'2-digit', minute:'2-digit'})}</span>
+                        </div>
+                    </div>
+                </header>
+
+                <main class="p-4 -mt-6 relative z-20 space-y-4 max-w-md mx-auto">
+                    <div onclick="window.setTab('create')" class="bg-white p-6 rounded-[2.5rem] shadow-xl flex items-center gap-4 border border-emerald-50 cursor-pointer active:scale-95 transition-all">
+                        <div class="bg-emerald-600 p-3.5 rounded-2xl text-white">
+                            <i data-lucide="plus" class="w-7 h-7"></i>
+                        </div>
+                        <div>
+                            <p class="font-black text-xl">أعلن عن جماعة</p>
+                            <p class="text-[11px] text-slate-400 font-bold">انشر موقعك ليصلي الناس معك</p>
+                        </div>
+                    </div>
+
+                    <div class="pt-2">
+                        <h3 class="font-black text-slate-700 flex items-center gap-2 mb-4 px-2">
+                            <div class="w-1.5 h-4 bg-emerald-500 rounded-full"></div>
+                            الجماعات القريبة
+                        </h3>
+                        <div id="groups-list" class="space-y-4">
+                            ${renderGroups()}
+                        </div>
+                    </div>
+                </main>
+
+                ${renderNav()}
+            </div>
+        `;
+
+        const renderGroups = () => {
+            if (prayerGroups.length === 0) {
+                return `<div class="bg-white py-12 rounded-[2.5rem] text-center border-2 border-dashed border-slate-200 text-slate-400">لا يوجد جماعات حالياً. كن الأول!</div>`;
+            }
+            return prayerGroups.map(g => `
+                <div class="bg-white p-6 rounded-[2.5rem] shadow-lg border border-slate-50 space-y-4">
+                    <div class="flex justify-between items-start">
+                        <div>
+                            <h4 class="font-black text-2xl text-emerald-900">صلاة ${g.prayer}</h4>
+                            <button onclick="window.openMap(${g.lat}, ${g.lng})" class="text-emerald-600 text-[10px] font-black underline">عرض الموقع</button>
+                        </div>
+                        <div class="bg-emerald-50 px-4 py-2 rounded-2xl text-center">
+                            <span class="text-[10px] block font-bold">مصلين</span>
+                            <span class="text-2xl font-black">${g.participants || 0}</span>
+                        </div>
+                    </div>
+                    <button onclick="window.joinGroup('${g.id}')" class="w-full py-4 rounded-2xl font-black ${g.joinedUsers?.includes(currentUser.uid) ? 'bg-emerald-100 text-emerald-700' : 'bg-slate-900 text-white'}">
+                        ${g.joinedUsers?.includes(currentUser.uid) ? 'تم تسجيل حضورك' : 'سأصلي معكم'}
+                    </button>
+                </div>
+            `).join('');
+        };
+
+        const renderCreate = () => `
+            <div class="min-h-screen p-4 pb-24 max-w-md mx-auto">
+                <div class="flex items-center gap-3 mb-6 pt-8" onclick="window.setTab('home')">
+                    <i data-lucide="chevron-right" class="bg-white p-2 rounded-full shadow"></i>
+                    <h2 class="text-xl font-black">تحديد موقع الجماعة</h2>
+                </div>
+                <div class="bg-white p-5 rounded-[2.5rem] shadow-2xl space-y-5">
+                    <div id="map" class="map-container"></div>
+                    <p class="text-center text-xs text-slate-400 font-bold">قم بتحريك الخريطة لتحديد مكان المصلى بدقة</p>
+                    <button id="publish-btn" onclick="window.publishGroup()" class="w-full bg-emerald-900 text-white py-5 rounded-[2rem] font-black text-xl shadow-xl flex items-center justify-center gap-2">
+                        <i data-lucide="navigation" class="w-5 h-5"></i> نشر الموقع الآن
+                    </button>
+                </div>
+                ${renderNav()}
+            </div>
+        `;
+
+        const renderNav = () => `
+            <nav class="fixed bottom-0 inset-x-0 bg-white/90 backdrop-blur-xl border-t border-slate-100 p-6 flex justify-around items-center z-[1000] rounded-t-[3rem] shadow-lg max-w-md mx-auto">
+                <div onclick="window.setTab('home')" class="flex flex-col items-center gap-1 ${activeTab === 'home' ? 'text-emerald-800' : 'text-slate-300'}">
+                    <i data-lucide="map-pin" class="w-6 h-6"></i>
+                    <span class="text-[9px] font-black">الرئيسية</span>
+                </div>
+                <div onclick="window.setTab('create')" class="bg-emerald-800 p-4 rounded-3xl -mt-16 shadow-2xl border-4 border-slate-50 text-white">
+                    <i data-lucide="plus" class="w-7 h-7"></i>
+                </div>
+                <div class="flex flex-col items-center gap-1 opacity-20">
+                    <i data-lucide="users" class="w-6 h-6 text-slate-300"></i>
+                    <span class="text-[9px] font-black">الأصدقاء</span>
+                </div>
+            </nav>
+        `;
+
+        // Logic Functions
+        window.setTab = (tab) => {
+            activeTab = tab;
+            renderApp();
+        };
+
+        let map, marker;
+        const initMap = () => {
+            setTimeout(() => {
+                const mapEl = document.getElementById('map');
+                if (!mapEl) return;
+                map = L.map('map', { zoomControl: false }).setView([24.7136, 46.6753], 13);
+                L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png').addTo(map);
+                marker = L.marker([24.7136, 46.6753], { draggable: false }).addTo(map);
+                map.on('move', () => {
+                    marker.setLatLng(map.getCenter());
+                });
+            }, 100);
+        };
+
+        window.openMap = (lat, lng) => {
+            window.open(`https://www.google.com/maps?q=${lat},${lng}`);
+        };
+
+        window.publishGroup = async () => {
+            if (!currentUser) return;
+            const btn = document.getElementById('publish-btn');
+            btn.disabled = true;
+            btn.innerHTML = 'جاري النشر...';
+            
+            const center = map.getCenter();
+            try {
+                const col = collection(db, 'artifacts', appId, 'public', 'data', 'prayerGroups');
+                await addDoc(col, {
+                    lat: center.lat,
+                    lng: center.lng,
+                    prayer: getCurrentPrayer(),
+                    participants: 1,
+                    hostId: currentUser.uid,
+                    joinedUsers: [currentUser.uid],
+                    createdAt: serverTimestamp()
+                });
+                window.setTab('home');
+            } catch (e) {
+                console.error("Error publishing group:", e);
+                btn.disabled = false;
+                btn.innerHTML = 'فشل النشر، حاول مجدداً';
+            }
+        };
+
+        window.joinGroup = async (groupId) => {
+            if (!currentUser) return;
+            try {
+                const ref = doc(db, 'artifacts', appId, 'public', 'data', 'prayerGroups', groupId);
+                const group = prayerGroups.find(g => g.id === groupId);
+                if (group.joinedUsers?.includes(currentUser.uid)) return;
+
+                await updateDoc(ref, {
+                    participants: increment(1),
+                    joinedUsers: [...(group.joinedUsers || []), currentUser.uid]
+                });
+            } catch (e) {
+                console.error("Error joining group:", e);
+            }
+        };
+
+        // Start listening only after Auth is confirmed (Rule 3)
+        const startDataListener = (user) => {
+            if (unsubscribeGroups) unsubscribeGroups();
+            
+            const q = collection(db, 'artifacts', appId, 'public', 'data', 'prayerGroups');
+            unsubscribeGroups = onSnapshot(q, 
+                (snapshot) => {
+                    const allGroups = snapshot.docs.map(doc => ({ id: doc.id, ...doc.data() }));
+                    // Rule 2: Filter in memory
+                    prayerGroups = allGroups.filter(g => g.prayer === getCurrentPrayer());
+                    renderApp();
+                },
+                (error) => {
+                    console.error("Snapshot error:", error);
+                    if (error.code === 'permission-denied') {
+                        console.warn("Retrying listener after re-auth...");
+                    }
+                }
+            );
+        };
+
+        // Authentication Initialization
+        const initSession = async () => {
+            try {
+                if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+                    await signInWithCustomToken(auth, __initial_auth_token);
+                } else {
+                    await signInAnonymously(auth);
+                }
+            } catch (error) {
+                console.error("Auth error:", error);
+            }
+        };
+
+        onAuthStateChanged(auth, (user) => {
+            if (user) {
+                currentUser = user;
+                startDataListener(user);
+            } else {
+                initSession();
+            }
+        });
+
+    </script>
+</body>
+</html>
